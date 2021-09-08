@@ -50,8 +50,7 @@
 #include <hwbinder/ProcessState.h>
 #include "ant_types.h"
 #include "AntHidlClient.h"
-using ::android::hardware::hidl_death_recipient;
-using ::android::wp;
+
 using com::qualcomm::qti::ant::V1_0::IAntHci;
 using com::qualcomm::qti::ant::V1_0::IAntHciCallbacks;
 using com::qualcomm::qti::ant::V1_0::AntPacket;
@@ -68,17 +67,6 @@ android::sp<IAntHci> anthci;
 typedef std::unique_lock<std::mutex> Lock;
 
 #define POLL_TIMEOUT_MS    100
-
-struct HidlDeathRecipient : public hidl_death_recipient {
-  virtual void serviceDied(
-      uint64_t /*cookie*/,
-      const wp<::android::hidl::base::V1_0::IBase>& /*who*/) {
-    ALOGI("%s ANT HidlDeathRecipient serviceDied", __func__ );
-    handle_death_recipient();
-  }
-};
-
-sp<HidlDeathRecipient> ANTHidlDeathRecipient = new HidlDeathRecipient();
 
 struct ant_hci_t {
 public:
@@ -186,7 +174,6 @@ bool hci_initialize()
       android::sp<IAntHciCallbacks> callbacks = new AntHciCallbacks();
       anthci->initialize(callbacks);
       ALOGV("%s: exit", __func__);
-      auto hidl_death_link = anthci->linkToDeath(ANTHidlDeathRecipient, 0);
       return true;
    } else {
       return false;
@@ -198,27 +185,14 @@ void hci_close() {
 
    if(anthci != nullptr)
    {
-      auto hidl_daemon_status = anthci->close();
-      if(!hidl_daemon_status.isOk())
-      {
-         ALOGE("%s: HIDL daemon is dead", __func__);
-      }
       std::unique_lock< std::mutex> lock(ant_hci.data_mtx);
       ant_hci.data_cond.notify_all();
+      anthci->close();
    }
    ant_hci.state = ANT_RADIO_DISABLED;
    ant_rx_clear();
    anthci =nullptr;
    ALOGI("%s: exit", __func__);
-}
-
-void handle_death_recipient()
-{
-   ALOGI("%s", __func__);
-   auto hidl_death_unlink = anthci->unlinkToDeath(ANTHidlDeathRecipient);
-   ant_hci.state = ANT_RADIO_RESETTING;
-   ant_rx_clear();
-   anthci =nullptr;
 }
 
 ANT_UINT ant_get_status()
@@ -238,19 +212,9 @@ ANTStatus ant_tx_write(ANT_U8 *pucTxMessage,ANT_U8 ucMessageLength)
       data.setToExternal(pucTxMessage+1, ucMessageLength-1);
       if (packet_type == ANT_DATA_TYPE_PACKET)
       {
-         auto hidl_daemon_status = anthci->sendAntData(data);
-         if (!hidl_daemon_status.isOk())
-         {
-            ALOGE("%s:sendAntData failed,HIDL dead", __func__);
-            return -1;
-         }
+         anthci->sendAntData(data);
       } else {
-         auto hidl_daemon_status = anthci->sendAntControl(data);
-         if (!hidl_daemon_status.isOk())
-         {
-            ALOGE("%s:sendAntControl failed,HIDL dead", __func__);
-            return -1;
-         }
+         anthci->sendAntControl(data);
       }
    } else {
       ALOGE("%s: antHci is NULL", __func__);
@@ -260,13 +224,13 @@ ANTStatus ant_tx_write(ANT_U8 *pucTxMessage,ANT_U8 ucMessageLength)
    return ucMessageLength;
 }
 
-ANTStatus ant_rx_check(int timeout)
+ANTStatus ant_rx_check()
 {
    ALOGV("%s: start", __func__);
    Lock lock(ant_hci.data_mtx);
    while (ant_hci.rx_processing == 0)
    {
-      ant_hci.data_cond.wait_for(lock,std::chrono::milliseconds(timeout));
+      ant_hci.data_cond.wait_for(lock,std::chrono::milliseconds(POLL_TIMEOUT_MS));
       if (ant_hci.state != ANT_RADIO_ENABLED)
       {
          return ANT_STATUS_NO_VALUE_AVAILABLE;
@@ -289,13 +253,6 @@ void ant_interface_init()
 {
    ALOGI("%s: start", __func__);
    bool status;
-
-   if (anthci != nullptr && ant_hci.state == ANT_RADIO_ENABLED)
-   {
-      ALOGI("%s: ant already enabled", __func__);
-      return;
-   }
-
    status = hci_initialize();
    if (status)
    {
@@ -304,11 +261,11 @@ void ant_interface_init()
       while(ant_hci.state == ANT_RADIO_ENABLING)
       {
          ant_hci.on_cond.wait(lk);
-         ALOGV("%s:after on_cond wait  ",__func__);
+         ALOGV(LOG_TAG,"%s:after on_cond wait  ",__func__);
       }
    } else {
-      ALOGE("%s:Failed ",__func__);
+      ALOGE(LOG_TAG,"%s:Failed ",__func__);
       ant_hci.state = ANT_RADIO_DISABLED;
    }
-   ALOGI("%s:exit ",__func__);
+   ALOGI(LOG_TAG,"%s:exit ",__func__);
 }
